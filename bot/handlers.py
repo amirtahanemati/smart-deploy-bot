@@ -1,3 +1,8 @@
+import json
+import base64
+import uuid
+import random
+import string
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart, Command
 from aiogram.enums import ParseMode
@@ -7,7 +12,6 @@ from core.database import AsyncSessionLocal
 from models.user import UserConnection
 from config import settings
 
-# Initialize bot and dispatcher
 bot = Bot(
     token=settings.BOT_TOKEN, 
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
@@ -16,51 +20,49 @@ dp = Dispatcher()
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
-    """Handle the /start command and send welcome instructions."""
     welcome_text = (
-        "👋 <b>Welcome to the Smart Deploy Notification Bot!</b>\n\n"
-        "This bot will send you real-time deployment logs and status alerts from your servers.\n\n"
-        "To connect your server, first run this command in your server terminal:\n"
-        "<code>smart-deploy bot connect</code>\n\n"
-        "Then, send the generated 6-digit code here using the following format:\n"
-        "<code>/connect YOUR_CODE</code>"
+        "👋 <b>Welcome to Smart Deploy Notification Bot!</b>\n\n"
+        "I will send you real-time deployment logs from your servers.\n\n"
+        "To connect a new server to this chat, simply send:\n"
+        "👉 /new_server"
     )
     await message.answer(welcome_text)
 
-@dp.message(Command("connect"))
-async def cmd_connect(message: types.Message):
-    """Handle the /connect command to pair a user's chat ID with their server."""
-    # Extract the pairing code from the command (e.g., /connect A7X9Q2)
-    parts = message.text.split()
-    if len(parts) != 2:
-        return await message.answer("⚠️ Invalid format. Please send the code like this:\n<code>/connect 123456</code>")
-        
-    pairing_code = parts[1].upper()
+@dp.message(Command("new_server"))
+async def cmd_new_server(message: types.Message):
+    """Generate a Magic Token to link a new server securely."""
     chat_id = message.chat.id
-
+    
+    # 1. Generate unique credentials
+    characters = string.ascii_uppercase + string.digits
+    pairing_code = ''.join(random.choices(characters, k=6))
+    secret_key = f"sd_{uuid.uuid4().hex}"
+    
+    # 2. Save securely to Database
     async with AsyncSessionLocal() as session:
-        # Check if this chat ID is already connected to a server
-        result = await session.execute(select(UserConnection).filter_by(telegram_chat_id=chat_id))
-        existing_user = result.scalar_one_or_none()
-
-        if existing_user:
-            # Update the existing connection with the new pairing code
-            existing_user.pairing_code = pairing_code
-            existing_user.is_active = True
-        else:
-            # Create a new connection record
-            new_connection = UserConnection(
-                telegram_chat_id=chat_id,
-                pairing_code=pairing_code,
-                is_active=True
-            )
-            session.add(new_connection)
-            
+        new_connection = UserConnection(
+            telegram_chat_id=chat_id,
+            pairing_code=pairing_code,
+            secret_key=secret_key,
+            is_active=True
+        )
+        session.add(new_connection)
         await session.commit()
         
-    success_text = (
-        f"✅ <b>Connection Successful!</b>\n"
-        f"Server Pairing Code: <code>{pairing_code}</code>\n\n"
-        "You will now receive all deployment logs from this server directly in this chat."
+    # 3. Create the Magic Token (Base64)
+    token_data = {
+        "url": settings.CENTRAL_API_URL,
+        "secret": secret_key,
+        "pairing_code": pairing_code
+    }
+    token_json = json.dumps(token_data)
+    magic_token = base64.b64encode(token_json.encode('utf-8')).decode('utf-8')
+    
+    # 4. Send instructions to the user
+    response_text = (
+        f"✅ <b>Server Credentials Generated!</b>\n\n"
+        f"To securely link your server, copy and run this exact command in your server's terminal:\n\n"
+        f"<code>smart-deploy bot link {magic_token}</code>\n\n"
+        f"<i>Pairing Code: {pairing_code}</i>"
     )
-    await message.answer(success_text)
+    await message.answer(response_text)
