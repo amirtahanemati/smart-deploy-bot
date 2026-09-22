@@ -5,11 +5,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.database import get_db
 from models.user import UserConnection
 from bot.handlers import bot
-from config import settings
 
 router = APIRouter()
 
-# Data model for incoming deployment logs from the client package
 class DeployLog(BaseModel):
     pairing_code: str
     message: str
@@ -20,23 +18,31 @@ async def send_notification(
     authorization: str = Header(None),
     db: AsyncSession = Depends(get_db)
 ):
-    """Receive logs from client servers and route them to the correct Telegram user."""
-    # Basic security layer to prevent unauthorized POST requests
-    if authorization != f"Bearer {settings.WEBHOOK_SECRET}":
-        raise HTTPException(status_code=401, detail="Unauthorized client")
+    """Receive logs from client servers and validate Dynamic Magic Tokens."""
+    
+    # 1. Validate the presence of Authorization header
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid token format")
+        
+    provided_secret = authorization.split(" ")[1]
 
-    # Retrieve the user's Chat ID based on the provided pairing code
+    # 2. Dynamic Security Check: Match BOTH pairing_code and secret_key
     result = await db.execute(
-        select(UserConnection).filter_by(pairing_code=log_data.pairing_code, is_active=True)
+        select(UserConnection).filter_by(
+            pairing_code=log_data.pairing_code,
+            secret_key=provided_secret,
+            is_active=True
+        )
     )
     user = result.scalar_one_or_none()
 
+    # 3. Reject if credentials don't match or server is inactive
     if not user:
-        raise HTTPException(status_code=404, detail="Pairing code not found or inactive")
+        raise HTTPException(status_code=401, detail="Unauthorized: Invalid credentials or inactive server")
 
-    # Route the message to the user via Telegram
+    # 4. Route the message to the specific user via Telegram
     try:
         await bot.send_message(chat_id=user.telegram_chat_id, text=log_data.message)
-        return {"status": "success", "message": "Notification sent successfully"}
+        return {"status": "success", "message": "Notification routed securely"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Telegram API Error: {str(e)}")
